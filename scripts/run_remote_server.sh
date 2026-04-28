@@ -14,7 +14,7 @@ export SWE_PRUNER_EMPTY_CACHE="${SWE_PRUNER_EMPTY_CACHE:-1}"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" \
-  "source '$VENV/bin/activate' && cd '$PROJECT_DIR' && pi-prune-swe-pruner-remote > '$LOG' 2>&1"
+  "source '$VENV/bin/activate' && cd '$PROJECT_DIR' && env SWE_PRUNER_MODEL_PATH='$SWE_PRUNER_MODEL_PATH' SWE_PRUNER_HOST='$SWE_PRUNER_HOST' SWE_PRUNER_PORT='$SWE_PRUNER_PORT' SWE_PRUNER_DTYPE='$SWE_PRUNER_DTYPE' SWE_PRUNER_EMPTY_CACHE='$SWE_PRUNER_EMPTY_CACHE' pi-prune-swe-pruner-remote > '$LOG' 2>&1"
 
 echo "started tmux session $SESSION"
 echo "logs: $LOG"
