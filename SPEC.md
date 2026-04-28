@@ -24,7 +24,7 @@ context.prune({
 
 This should become a first-tier capability available to all Pi tools/extensions through a shared service contract, comparable in ergonomics to reading files, managing artifacts, and managing context. It may live in Pi core or in a neutral dedicated extension, but it must not be owned by one consumer such as DCP.
 
-The current `swe_pruner_scan` MCP tool is only a compatibility/development shim. It should not be the conceptual product.
+`prune_context` is owned by `pi-prune-router`; this provider only registers the SWE-Pruner backend.
 
 ## 3. Core distinction
 
@@ -88,7 +88,7 @@ pi_swe_pruner_provider
 Temporary MCP tool name may remain identifier-like:
 
 ```text
-swe_pruner_scan
+prune_context
 ```
 
 ## 6. Target repository location
@@ -171,8 +171,8 @@ Pi content-producing surfaces (`read`, `bash`, `fetch`, web search, MCP, subagen
 Temporary compatibility architecture:
 
 ```text
-Pi promoted tool: swe_pruner_scan
-  -> TypeScript MCP compatibility shim
+Pi tool: prune_context
+  -> pi-prune-router
     -> local path/glob expansion
     -> local file reads
     -> provider.prune(...)
@@ -695,10 +695,10 @@ Migration tasks:
 
 ## 18. Temporary MCP compatibility shim
 
-Until Pi has first-class `context.prune(...)`, a local MCP compatibility shim may expose:
+Until Pi has first-class `context.prune(...)`, the router exposes:
 
 ```text
-swe_pruner_scan
+prune_context
 ```
 
 This shim should be implemented in TypeScript because it needs local filesystem access.
