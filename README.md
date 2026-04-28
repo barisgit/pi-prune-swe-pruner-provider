@@ -8,12 +8,12 @@ This package contains:
 - a generic remote Python HTTP backend exposing `/health` and `/prune`
 - Vast.ai install/run/tunnel scripts
 
-It does **not** expose user-facing pruning tools. Public tools such as `prune_context` are owned by `pi-prune-router`.
+It does **not** expose user-facing pruning tools. Public tools such as `scan_files` are owned by `pi-prune-router`.
 
 ## Architecture
 
 ```text
-Pi prune_context tool / prune:request event
+Pi scan_files tool / prune:request event
   -> pi-prune-router
     -> provider prune(request)
       -> TypeScript SwePrunerClient
