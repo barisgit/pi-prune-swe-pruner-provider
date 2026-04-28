@@ -1,0 +1,41 @@
+{
+  "name": "pi-prune-swe-pruner-provider",
+  "version": "0.1.0",
+  "description": "SWE-Pruner provider/backend for pi-prune-router",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prune-provider",
+    "swe-pruner"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src/**/*.ts",
+    "python/src/**/*.py",
+    "scripts/*.sh",
+    "examples/*.json",
+    "README.md",
+    "SPEC.md",
+    "pyproject.toml"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.65.0",
+    "@sinclair/typebox": "^0.34.41",
+    "@types/bun": "^1.3.13",
+    "typescript": "^6.0.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "ci": "bun run typecheck && bun test && python3 -m py_compile python/src/pi_prune_swe_pruner_provider/*.py"
+  }
+}

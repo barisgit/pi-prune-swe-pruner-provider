@@ -1,0 +1,9 @@
+{
+  "packages": [
+    "/Users/blaz/Programming_local/Projects/pi-extensions/pi-prune-router",
+    "/Users/blaz/Programming_local/Projects/pi-extensions/pi-prune-swe-pruner-provider"
+  ],
+  "env": {
+    "SWE_PRUNER_REMOTE_URL": "http://127.0.0.1:8765"
+  }
+}

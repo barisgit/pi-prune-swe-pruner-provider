@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-prune-swe-pruner-provider"
+version = "0.1.0"
+description = "Remote SWE-Pruner HTTP backend for pi-prune-router"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.10",
+]
+
+[project.optional-dependencies]
+remote = [
+  "accelerate",
+  "huggingface-hub",
+  "protobuf",
+  "sentencepiece",
+  "swe-pruner==0.1.1",
+  "transformers==4.57.1",
+]
+
+[project.scripts]
+pi-prune-swe-pruner-remote = "pi_prune_swe_pruner_provider.remote_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["python/src"]
+
+[tool.ruff]
+line-length = 120
