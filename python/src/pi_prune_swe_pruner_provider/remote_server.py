@@ -20,6 +20,8 @@ MODEL_DTYPE = getattr(torch, MODEL_DTYPE_NAME)
 MAX_DOCUMENTS = int(os.environ.get("SWE_PRUNER_MAX_DOCUMENTS", "50"))
 MAX_DOCUMENT_CHARS = int(os.environ.get("SWE_PRUNER_MAX_DOCUMENT_CHARS", "500000"))
 MAX_TOTAL_CHARS = int(os.environ.get("SWE_PRUNER_MAX_TOTAL_CHARS", "1000000"))
+DEFAULT_MAX_RENDERED_DOCUMENTS = int(os.environ.get("SWE_PRUNER_MAX_RENDERED_DOCUMENTS", "10"))
+DEFAULT_MAX_RENDERED_CHARS = int(os.environ.get("SWE_PRUNER_MAX_RENDERED_CHARS", "20000"))
 
 app = FastAPI(title="pi-prune-swe-pruner-provider", version="0.1.0")
 _model = None
@@ -88,6 +90,8 @@ def health() -> dict[str, Any]:
             "max_documents": MAX_DOCUMENTS,
             "max_document_chars": MAX_DOCUMENT_CHARS,
             "max_total_chars": MAX_TOTAL_CHARS,
+            "max_rendered_documents": DEFAULT_MAX_RENDERED_DOCUMENTS,
+            "max_rendered_chars": DEFAULT_MAX_RENDERED_CHARS,
         },
     }
 
@@ -105,16 +109,18 @@ def prune(request: RouterPruneRequest) -> dict[str, Any]:
         finally:
             _cleanup_cuda()
     results.sort(key=lambda item: item.get("score") or 0.0, reverse=True)
-    if request.options.maxOutputDocuments:
-        results = results[: request.options.maxOutputDocuments]
+    rendered_results, warnings = _select_rendered_results(request, results)
 
-    text = "\n\n---\n\n".join(_format_document_result(result) for result in results)
-    input_tokens = sum((item.get("stats") or {}).get("inputTokens") or 0 for item in results)
-    output_tokens = sum((item.get("stats") or {}).get("outputTokens") or 0 for item in results)
+    text = "\n\n---\n\n".join(_format_document_result(result) for result in rendered_results)
+    if warnings:
+        text = f"{text}\n\n" + "\n".join(f"[{warning}]" for warning in warnings)
+    input_tokens = sum((item.get("stats") or {}).get("inputTokens") or 0 for item in rendered_results)
+    output_tokens = sum((item.get("stats") or {}).get("outputTokens") or 0 for item in rendered_results)
     return {
         "ok": True,
         "text": text,
-        "documents": results,
+        "documents": rendered_results,
+        "warnings": warnings or None,
         "stats": {
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
@@ -126,6 +132,47 @@ def prune(request: RouterPruneRequest) -> dict[str, Any]:
         },
         "provider": "swe-pruner",
     }
+
+
+def _select_rendered_results(request: RouterPruneRequest, results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    if not results:
+        return [], []
+
+    max_documents = request.options.maxOutputDocuments
+    if max_documents is None and len(results) > 1:
+        max_documents = DEFAULT_MAX_RENDERED_DOCUMENTS
+
+    max_chars = _requested_char_budget(request)
+    if max_chars is None and len(results) > 1:
+        max_chars = DEFAULT_MAX_RENDERED_CHARS
+
+    selected: list[dict[str, Any]] = []
+    rendered_chars = 0
+    for result in results:
+        if max_documents is not None and len(selected) >= max_documents:
+            break
+        formatted_len = len(_format_document_result(result))
+        separator_len = 5 if selected else 0
+        if max_chars is not None and selected and rendered_chars + separator_len + formatted_len > max_chars:
+            break
+        selected.append(result)
+        rendered_chars += separator_len + formatted_len
+
+    if not selected:
+        selected = results[:1]
+
+    omitted = len(results) - len(selected)
+    warnings = [f"omitted {omitted} lower-scoring document result{'s' if omitted != 1 else ''} due to output budget"] if omitted else []
+    return selected, warnings
+
+
+def _requested_char_budget(request: RouterPruneRequest) -> int | None:
+    if not isinstance(request.budget, dict):
+        return None
+    chars = request.budget.get("chars")
+    if isinstance(chars, int) and chars > 0:
+        return chars
+    return None
 
 
 def _validate_request_size(request: RouterPruneRequest) -> None:
