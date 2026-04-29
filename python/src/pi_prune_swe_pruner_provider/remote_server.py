@@ -4,10 +4,11 @@ import gc
 import os
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from swe_pruner.prune_wrapper import PruneRequest as SwePruneRequest
 from swe_pruner.prune_wrapper import SwePrunerForCodePruning
@@ -16,10 +17,14 @@ MODEL_PATH = os.environ.get("SWE_PRUNER_MODEL_PATH", "/workspace/models/code-pru
 DEFAULT_THRESHOLD = float(os.environ.get("SWE_PRUNER_THRESHOLD", "0.5"))
 MODEL_DTYPE_NAME = os.environ.get("SWE_PRUNER_DTYPE", "float16")
 MODEL_DTYPE = getattr(torch, MODEL_DTYPE_NAME)
+MAX_DOCUMENTS = int(os.environ.get("SWE_PRUNER_MAX_DOCUMENTS", "50"))
+MAX_DOCUMENT_CHARS = int(os.environ.get("SWE_PRUNER_MAX_DOCUMENT_CHARS", "500000"))
+MAX_TOTAL_CHARS = int(os.environ.get("SWE_PRUNER_MAX_TOTAL_CHARS", "1000000"))
 
 app = FastAPI(title="pi-prune-swe-pruner-provider", version="0.1.0")
 _model = None
 _model_lock = threading.Lock()
+_prune_lock = threading.Lock()
 _loaded_at: float | None = None
 
 
@@ -57,6 +62,7 @@ def get_model():
             t0 = time.time()
             _model = SwePrunerForCodePruning.from_pretrained(MODEL_PATH, torch_dtype=MODEL_DTYPE)
             _model.eval()
+            _disable_generation_cache(_model)
             _loaded_at = time.time() - t0
         return _model
 
@@ -78,13 +84,26 @@ def health() -> dict[str, Any]:
         "model_load_sec": _loaded_at,
         "cuda_available": torch.cuda.is_available(),
         "gpu": gpu,
+        "limits": {
+            "max_documents": MAX_DOCUMENTS,
+            "max_document_chars": MAX_DOCUMENT_CHARS,
+            "max_total_chars": MAX_TOTAL_CHARS,
+        },
     }
 
 
 @app.post("/prune")
 def prune(request: RouterPruneRequest) -> dict[str, Any]:
+    _validate_request_size(request)
     t0 = time.time()
-    results = [_prune_document(request, document) for document in request.documents]
+    with _prune_lock:
+        try:
+            results = [_prune_document(request, document) for document in request.documents]
+        except torch.cuda.OutOfMemoryError as error:
+            _cleanup_cuda()
+            raise HTTPException(status_code=507, detail=f"SWE-Pruner CUDA out of memory: {error}") from error
+        finally:
+            _cleanup_cuda()
     results.sort(key=lambda item: item.get("score") or 0.0, reverse=True)
     if request.options.maxOutputDocuments:
         results = results[: request.options.maxOutputDocuments]
@@ -109,6 +128,35 @@ def prune(request: RouterPruneRequest) -> dict[str, Any]:
     }
 
 
+def _validate_request_size(request: RouterPruneRequest) -> None:
+    if len(request.documents) > MAX_DOCUMENTS:
+        raise HTTPException(status_code=413, detail=f"Too many documents: {len(request.documents)} > {MAX_DOCUMENTS}")
+    total_chars = 0
+    for document in request.documents:
+        char_count = len(document.text)
+        source = document.source or document.id or "input"
+        if char_count > MAX_DOCUMENT_CHARS:
+            raise HTTPException(status_code=413, detail=f"Document too large: {source} has {char_count} chars > {MAX_DOCUMENT_CHARS}")
+        total_chars += char_count
+    if total_chars > MAX_TOTAL_CHARS:
+        raise HTTPException(status_code=413, detail=f"Request too large: {total_chars} chars > {MAX_TOTAL_CHARS}")
+
+
+def _disable_generation_cache(model: Any) -> None:
+    for candidate in (model, getattr(model, "model", None), getattr(getattr(model, "model", None), "backbone", None)):
+        config = getattr(candidate, "config", None)
+        if config is not None and hasattr(config, "use_cache"):
+            config.use_cache = False
+
+
+def _cleanup_cuda() -> None:
+    gc.collect()
+    if torch.cuda.is_available() and os.environ.get("SWE_PRUNER_EMPTY_CACHE", "1") != "0":
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+
+
 def _prune_document(request: RouterPruneRequest, document: PruneDocument) -> dict[str, Any]:
     model = get_model()
     query = _build_query(request)
@@ -120,7 +168,8 @@ def _prune_document(request: RouterPruneRequest, document: PruneDocument) -> dic
         chunk_overlap_tokens=request.options.chunkOverlapTokens,
     )
     t0 = time.time()
-    with torch.inference_mode():
+    autocast = torch.autocast("cuda", dtype=MODEL_DTYPE) if torch.cuda.is_available() else nullcontext()
+    with torch.inference_mode(), autocast:
         resp = model.prune(req)
     kept_lines = list(resp.kept_frags)
     result = {
@@ -137,9 +186,7 @@ def _prune_document(request: RouterPruneRequest, document: PruneDocument) -> dic
         },
     }
     del req, resp
-    gc.collect()
-    if torch.cuda.is_available() and os.environ.get("SWE_PRUNER_EMPTY_CACHE", "1") != "0":
-        torch.cuda.empty_cache()
+    _cleanup_cuda()
     return result
 
 
