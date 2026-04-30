@@ -105,50 +105,42 @@ This project should replace the earlier prototype location:
 
 The old name should not remain as the canonical source of truth because the project is no longer MCP-centered.
 
-## 7. Target repository structure
+## 7. Repository structure
 
-The project is primarily a Pi extension/provider project, expected to become mostly TypeScript on the Pi side, while also containing the Python remote inference service and deployment scripts.
+The project is a Pi extension/provider package with a Python remote inference service and deployment scripts.
 
-Target structure:
+Current implementation structure:
 
 ```text
 pi-prune-swe-pruner-provider/
-  SPEC.md
   README.md
+  SPEC.md
+  TRAINING_PROPOSAL.md
   package.json
+  pyproject.toml
   tsconfig.json
 
   src/
-    index.ts
-    types.ts
-    provider.ts
-    remote-client.ts
-    local-input.ts
-    artifact.ts
-    mcp/
-      server.ts
+    index.ts            # Pi extension entrypoint; registers provider
+    remote-client.ts    # HTTP client for /health and /prune
+    types.ts            # shared TypeScript request/result types
+    *.test.ts
 
-  python/
-    pyproject.toml
-    uv.lock
-    src/
-      pi_swe_pruner_provider/
-        __init__.py
-        model.py
-        remote_api.py
-        remote_cli.py
-        types.py
-    scripts/
-      install_remote_vast.sh
-      run_remote_server.sh
-      start_tunnel.sh
+  python/src/pi_prune_swe_pruner_provider/
+    __init__.py
+    remote_cli.py       # CLI entrypoint for FastAPI backend
+    remote_server.py    # /health and /prune implementation
+
+  scripts/
+    install_remote_vast.sh
+    run_remote_server.sh
+    start_tunnel.sh
 
   examples/
-    pi-mcp.json
-    env.example
+    pi-extensions.json
 ```
 
-Current prototype files from `swe-pruner-mcp` should be migrated into this layout rather than kept as loose files.
+`README.md` is the operational source of truth for recreating the current backend. This SPEC records design intent and should not describe files that do not exist.
 
 ## 8. Architecture
 
@@ -244,13 +236,13 @@ The remote backend must not know about:
 
 When `context.prune(...)` receives large raw input, Pi should save the full raw content as an artifact before pruning.
 
-Recommended default artifact location:
+Default artifact location:
 
 ```text
-~/.pi/agent/prune-artifacts/
+~/.pi/prune-artifacts/
 ```
 
-or, if Pi has an existing canonical artifact directory, use that instead.
+This lives outside the agent configuration tree. It can be overridden with `PI_PRUNE_ARTIFACT_DIR`.
 
 Avoid `/tmp` as the default for important prune artifacts because:
 
@@ -263,24 +255,23 @@ Avoid `/tmp` as the default for important prune artifacts because:
 Artifact layout should be deterministic enough for debugging and safe enough to avoid collisions:
 
 ```text
-~/.pi/agent/prune-artifacts/
+~/.pi/prune-artifacts/
   YYYY-MM-DD/
-    <session-id-or-hash>/
-      <turn-index>-<tool-name-or-source>-<hash>.txt
-      <turn-index>-<tool-name-or-source>-<hash>.meta.json
+    <timestamp-id>.txt
+    <timestamp-id>.json
 ```
 
 Example:
 
 ```text
-~/.pi/agent/prune-artifacts/2026-04-29/session-a13f/0042-bun-test-9e1c2a.log
-~/.pi/agent/prune-artifacts/2026-04-29/session-a13f/0042-bun-test-9e1c2a.meta.json
+~/.pi/prune-artifacts/2026-04-29/2026-04-29T12-00-00-000Z-a1b2c3.txt
+~/.pi/prune-artifacts/2026-04-29/2026-04-29T12-00-00-000Z-a1b2c3.json
 ```
 
 The model-facing pruned output should include the artifact reference:
 
 ```text
-Full raw content saved at: ~/.pi/agent/prune-artifacts/2026-04-29/session-a13f/0042-bun-test-9e1c2a.log
+Full raw content saved at: ~/.pi/prune-artifacts/2026-04-29/2026-04-29T12-00-00-000Z-a1b2c3.txt
 ```
 
 The pruner backend does not need a retrieval API for full artifacts. If the agent needs the full content later, it can use normal Pi tools such as `read`, `grep`, or future artifact tools.
@@ -603,7 +594,7 @@ Pi keeps the artifact ref. Backend receives only content and pruning hints:
 Pi reattaches artifact information in rendered output:
 
 ```text
-Full raw output saved at: ~/.pi/agent/prune-artifacts/2026-04-29/session-a13f/0042-bun-test-9e1c2a.log
+Full raw output saved at: ~/.pi/prune-artifacts/2026-04-29/2026-04-29T12-00-00-000Z-a1b2c3.txt
 ```
 
 ## 15. Backend implementation details
@@ -622,76 +613,74 @@ Server should do:
 
 - load `ayanami-kitasan/code-pruner`
 - use `torch.float16` by default
-- run under `torch.inference_mode()`
+- disable generation/model cache where supported
+- run under `torch.inference_mode()` and CUDA autocast
+- serialize prune calls with a single-flight lock unless concurrency has been measured safe
+- enforce request size limits before model inference
+- return `413` for oversized requests/documents
+- return `507` for CUDA OOM after cleanup
 - clear CUDA cache after requests unless disabled
 - batch documents safely within GPU constraints
+- cap rendered output for multi-document requests
 - return per-document scores/stats
 - preserve/reconstruct exact original lines where possible
 
 Server should not be just raw model logits, because that would force the TypeScript extension to understand SWE-Pruner internals.
 
-## 16. Current known-good remote deployment
+## 16. Recreating a remote deployment
 
-Current new validated server:
+The backend should be reproducible from this repository on a fresh GPU instance.
+
+Operational contract:
 
 ```text
-Vast instance: 35764249
-GPU: RTX 5060 Ti 16GB
-SSH: root@171.248.245.1 -p 48185
-Current remote service: http://127.0.0.1:8765/mcp  (prototype only)
-tmux: swe-pruner-mcp
-log: /workspace/swe_pruner_mcp.log
+Pi/provider config -> http://127.0.0.1:8765
+local tunnel        -> remote 127.0.0.1:<backend port>
+remote backend      -> FastAPI /health and /prune
 ```
 
-Current tunnel command:
+Recommended remote backend port is `8766` so local port `8765` can stay stable across providers/backends:
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 -p 48185 root@171.248.245.1
+# remote GPU instance
+cd /workspace/pi-prune-swe-pruner-provider
+SWE_PRUNER_PORT=8766 bash scripts/run_remote_server.sh
+
+# local machine
+SWE_PRUNER_SSH_HOST=<host> \
+SWE_PRUNER_SSH_PORT=<port> \
+SWE_PRUNER_LOCAL_PORT=8765 \
+SWE_PRUNER_REMOTE_PORT=8766 \
+  bash scripts/start_tunnel.sh
 ```
 
-Old fallback server:
+Validation:
 
-```text
-Vast instance: 35749580
-GPU: RTX 3060
-SSH: ssh4.vast.ai:29580
+```bash
+curl http://127.0.0.1:8765/health
+curl -X POST http://127.0.0.1:8765/prune \
+  -H 'content-type: application/json' \
+  -d '{"goal":"Find auth gate logic","documents":[{"source":"demo.ts","text":"function authGate(user) { return user?.role === '\''admin'\'' }"}]}'
 ```
 
-Do not delete the old server until the provider repo is renamed/migrated and the new non-MCP HTTP API is validated.
+Then reload Pi and run `scan_files` on a small source directory.
 
-## 17. Migration from current prototype
+## 17. Migration status
 
-Current prototype repo:
-
-```text
-/Users/blaz/Programming_local/Projects/swe-pruner-mcp
-```
-
-Target repo:
+The old `swe-pruner-mcp` prototype is no longer the canonical source of truth. The canonical provider repo is:
 
 ```text
 /Users/blaz/Programming_local/Projects/pi-extensions/pi-prune-swe-pruner-provider
 ```
 
-Migration tasks:
+Completed migration decisions:
 
-1. Move/rename project.
-2. Convert package/module names:
-   - package: `pi-prune-swe-pruner-provider`
-   - Python module: `pi_swe_pruner_provider`
-3. Move Python code under `python/` or keep under package if project remains Python-first temporarily.
-4. Add TypeScript project scaffolding.
-5. Refactor remote server from FastMCP to generic HTTP API:
-   - `GET /health`
-   - `POST /prune`
-6. Move local filesystem expansion out of Python MCP wrapper into TypeScript.
-7. Keep temporary local MCP shim in TypeScript if direct tool experiments remain useful.
-8. Update Pi `mcp.json` to point to TypeScript shim or new CLI.
-9. Delete stale duplicate:
-   ```text
-   /Users/blaz/.pi/agent/mcp/swe_pruner_local.py
-   ```
-10. Update README and examples to remove MCP-centered language.
+1. Public tool ownership moved to `pi-prune-router` as `scan_files`.
+2. Provider-specific direct tools were removed from the provider responsibility.
+3. Remote backend is generic HTTP (`GET /health`, `POST /prune`), not MCP.
+4. Local filesystem expansion lives in `pi-prune-router`.
+5. Stale local wrapper `/Users/blaz/.pi/agent/mcp/swe_pruner_local.py` was removed.
+6. The stable local backend URL is `http://127.0.0.1:8765`.
 
 ## 18. Temporary MCP compatibility shim
 
@@ -865,9 +854,7 @@ Call local shim/provider with a directory path and confirm:
 
 ## 22. Open decisions
 
-1. Exact permanent artifact directory:
-   - recommended: `~/.pi/agent/prune-artifacts/`
-   - can switch if Pi has canonical artifact storage
+1. Whether artifact retention should be global default `7` days forever, or configurable per request/session.
 
 2. Whether temporary MCP shim remains in this repo or in Pi dev tooling.
 
